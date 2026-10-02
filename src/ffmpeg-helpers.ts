@@ -4,6 +4,8 @@ import type { FileMetadata, SilenceInterval } from './types';
 import { formatDuration, getFileExtension } from './utils.js';
 import { getFormatByExtension, isCodecSupported } from './constants.js';
 
+let inputCounter = 0;
+
 /**
  * Write a file into FFmpeg's virtual filesystem once, so callers can run
  * multiple passes (metadata probe, silencedetect, ...) against it without
@@ -11,7 +13,9 @@ import { getFormatByExtension, isCodecSupported } from './constants.js';
  */
 export async function writeInputFile(ffmpeg: FFmpeg, file: File): Promise<string> {
   const ext = getFileExtension(file.name);
-  const inputName = `input${ext}`;
+  // Unique per call, so a cancelled job's cleanup can never delete the
+  // input of the job that replaced it.
+  const inputName = `input-${++inputCounter}${ext}`;
   await ffmpeg.writeFile(inputName, await fetchFile(file));
   return inputName;
 }
@@ -57,16 +61,33 @@ export async function extractMetadataDetailed(
   return parseDetailedMetadata(ffmpegOutput, file, format);
 }
 
+const CHANNEL_LAYOUTS: Record<string, number> = {
+  mono: 1,
+  stereo: 2,
+  '2.1': 3,
+  quad: 4,
+  '4.0': 4,
+  '5.0': 5,
+  '5.1': 6,
+  '6.1': 7,
+  '7.1': 8,
+};
+
 /**
- * Parse detailed metadata from FFmpeg logs
+ * Parse detailed metadata from FFmpeg logs.
+ *
+ * Works line by line on the `Stream #...: Video:` / `Audio:` lines and
+ * treats every field except the codec as optional — ffmpeg omits bitrate
+ * for FLAC/Opus and fps for variable-frame-rate video, and none of those
+ * should change whether a stream is detected.
  */
-function parseDetailedMetadata(
+export function parseDetailedMetadata(
   logs: string,
   file: File,
   format: ReturnType<typeof getFormatByExtension>
 ): FileMetadata {
-  // Extract duration
-  const durationMatch = logs.match(/Duration: (\d{2}):(\d{2}):(\d{2}\.\d{2})/);
+  // Extract duration (reported as "N/A" for some streamed recordings)
+  const durationMatch = logs.match(/Duration: (\d+):(\d{2}):(\d{2}(?:\.\d+)?)/);
   let duration = 0;
   if (durationMatch) {
     const hours = parseInt(durationMatch[1]);
@@ -75,41 +96,48 @@ function parseDetailedMetadata(
     duration = hours * 3600 + minutes * 60 + seconds;
   }
 
-  // Extract video stream info
-  const videoMatch = logs.match(
-    /Stream #\d+:\d+.*?: Video: (\w+)[^\n]*?(\d{3,5})x(\d{3,5})[^\n]*?(\d+(?:\.\d+)?) fps/
-  );
   let hasVideo = false;
   let videoCodec: string | undefined;
   let width: number | undefined;
   let height: number | undefined;
   let frameRate: number | undefined;
 
-  if (videoMatch) {
-    hasVideo = true;
-    videoCodec = videoMatch[1];
-    width = parseInt(videoMatch[2]);
-    height = parseInt(videoMatch[3]);
-    frameRate = parseFloat(videoMatch[4]);
-  }
-
-  // Extract audio stream info
-  const audioMatch = logs.match(
-    /Stream #\d+:\d+.*?: Audio: (\w+)[^\n]*?(\d+) Hz[^\n]*?(\w+)[^\n]*?(\d+) kb\/s/
-  );
   let hasAudio = false;
   let audioCodec: string | undefined;
   let sampleRate: number | undefined;
   let channels: number | undefined;
   let audioBitrate: number | undefined;
 
-  if (audioMatch) {
-    hasAudio = true;
-    audioCodec = audioMatch[1];
-    sampleRate = parseInt(audioMatch[2]);
-    const channelType = audioMatch[3];
-    channels = channelType === 'mono' ? 1 : channelType === 'stereo' ? 2 : undefined;
-    audioBitrate = parseInt(audioMatch[4]) * 1000;
+  for (const line of logs.split('\n')) {
+    const stream = line.match(/Stream #\d+:\d+.*?: (Video|Audio): (\w+)(.*)$/);
+    if (!stream) continue;
+    const [, kind, codec, rest] = stream;
+
+    // Album art in MP3/M4A shows up as an mjpeg/png "video" stream; it isn't
+    // real video and shouldn't make an audio file look like a video file.
+    if (kind === 'Video' && !hasVideo && !rest.includes('(attached pic)')) {
+      hasVideo = true;
+      videoCodec = codec;
+      const res = rest.match(/\b(\d{2,5})x(\d{2,5})\b/);
+      if (res) {
+        width = parseInt(res[1]);
+        height = parseInt(res[2]);
+      }
+      const fps = rest.match(/(\d+(?:\.\d+)?) fps/);
+      if (fps) frameRate = parseFloat(fps[1]);
+    } else if (kind === 'Audio' && !hasAudio) {
+      hasAudio = true;
+      audioCodec = codec;
+      const hz = rest.match(/(\d+) Hz/);
+      if (hz) sampleRate = parseInt(hz[1]);
+      const layout = rest.match(/Hz, ([^,(]+)/)?.[1].trim();
+      if (layout) {
+        // Named layouts ("stereo", "5.1"), or ffmpeg's "N channels" fallback
+        channels = CHANNEL_LAYOUTS[layout] ?? (parseInt(layout) || undefined);
+      }
+      const kbps = rest.match(/(\d+) kb\/s/);
+      if (kbps) audioBitrate = parseInt(kbps[1]) * 1000;
+    }
   }
 
   // Check if format/codec is supported
@@ -152,20 +180,34 @@ function parseDetailedMetadata(
   };
 }
 
+/** Sample rate of the mono PCM copy returned by analyzeAudio. */
+export const ANALYSIS_SAMPLE_RATE = 8000;
+
+export interface AudioAnalysis {
+  intervals: SilenceInterval[];
+  /** Mono 16-bit PCM at ANALYSIS_SAMPLE_RATE, for the waveform preview. */
+  samples: Int16Array;
+}
+
 /**
- * Run ffmpeg's silencedetect audio filter and parse the resulting
- * silence intervals from its log output.
+ * Decode the audio once and get two things out of that single pass:
+ * silencedetect intervals (from the full-quality audio, parsed from the
+ * logs) and a small downsampled mono PCM copy for the waveform. Keeping
+ * the copy at 8 kHz/16-bit (~16 KB per second) avoids decoding the whole
+ * file to full-rate floats in the browser, which ran out of memory on
+ * long recordings.
  */
-export async function detectSilence(
+export async function analyzeAudio(
   ffmpeg: FFmpeg,
   inputName: string,
   thresholdDb: number,
   minDurationSeconds: number
-): Promise<SilenceInterval[]> {
+): Promise<AudioAnalysis> {
   let output = '';
   const logHandler = ({ message }: { message: string }) => {
     output += message + '\n';
   };
+  const pcmName = `${inputName}.pcm`;
   ffmpeg.on('log', logHandler);
 
   try {
@@ -175,18 +217,26 @@ export async function detectSilence(
       '-vn',
       '-af',
       `silencedetect=noise=${thresholdDb}dB:d=${minDurationSeconds}`,
+      '-ac',
+      '1',
+      '-ar',
+      String(ANALYSIS_SAMPLE_RATE),
       '-f',
-      'null',
-      '-',
+      's16le',
+      '-y',
+      pcmName,
     ]);
-  } catch (error) {
-    // ffmpeg exits non-zero when writing to the null muxer; the info we
-    // need is in the captured logs regardless.
+  } finally {
+    ffmpeg.off('log', logHandler);
   }
 
-  ffmpeg.off('log', logHandler);
+  const data = (await ffmpeg.readFile(pcmName)) as Uint8Array;
+  await deleteInputFile(ffmpeg, pcmName);
+  const samples = new Int16Array(
+    data.buffer.slice(data.byteOffset, data.byteOffset + (data.byteLength & ~1))
+  );
 
-  return parseSilenceIntervals(output);
+  return { intervals: parseSilenceIntervals(output), samples };
 }
 
 /**
@@ -196,7 +246,7 @@ export async function detectSilence(
  *   [silencedetect @ 0x...] silence_start: 4.2
  *   [silencedetect @ 0x...] silence_end: 6.7 | silence_duration: 2.5
  */
-function parseSilenceIntervals(logs: string): SilenceInterval[] {
+export function parseSilenceIntervals(logs: string): SilenceInterval[] {
   const intervals: SilenceInterval[] = [];
   let pendingStart: number | null = null;
 

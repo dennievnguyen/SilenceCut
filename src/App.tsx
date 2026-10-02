@@ -6,9 +6,15 @@ import { FileInfo } from './components/FileInfo.js';
 import { Waveform } from './components/Waveform.js';
 import { AppShell, type PipelineStepId } from './components/AppShell.js';
 import type { FileMetadata, AppState, SilenceInterval } from './types.js';
-import { extractMetadataDetailed, detectSilence, writeInputFile, deleteInputFile } from './ffmpeg-helpers.js';
+import {
+  extractMetadataDetailed,
+  analyzeAudio,
+  writeInputFile,
+  deleteInputFile,
+  ANALYSIS_SAMPLE_RATE,
+} from './ffmpeg-helpers.js';
 import { validateFileLimits, formatDuration } from './utils.js';
-import { generateWaveformPeaks, type WaveformPeaks } from './waveform.js';
+import { computeWaveformPeaks, type WaveformPeaks } from './waveform.js';
 import { DEFAULT_SETTINGS } from './constants.js';
 
 function App() {
@@ -18,6 +24,14 @@ function App() {
   const [error, setError] = useState<string>('');
   const [logs, setLogs] = useState<string[]>([]);
   const [ffmpegRef] = useState(() => new FFmpeg());
+  const loadStartedRef = useRef(false);
+  const coreURLsRef = useRef<{ coreURL: string; wasmURL: string } | null>(null);
+
+  // Incremented whenever a file is selected or removed. A processing job
+  // checks it after each await and bails out if it's no longer current, so
+  // a removed/replaced file's results never land in state.
+  const jobIdRef = useRef(0);
+  const busyRef = useRef(false);
 
   // File state
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
@@ -28,7 +42,6 @@ function App() {
   // Silence detection state
   const [silenceIntervals, setSilenceIntervals] = useState<SilenceInterval[] | null>(null);
   const [waveformPeaks, setWaveformPeaks] = useState<WaveformPeaks | null>(null);
-  const [waveformError, setWaveformError] = useState<string>('');
 
   // Playback state
   const mediaRef = useRef<HTMLVideoElement | HTMLAudioElement>(null);
@@ -36,6 +49,12 @@ function App() {
   const [isPlaying, setIsPlaying] = useState(false);
 
   useEffect(() => {
+    // StrictMode runs effects twice in dev; only load once.
+    if (loadStartedRef.current) return;
+    loadStartedRef.current = true;
+    ffmpegRef.on('log', ({ message }) => {
+      console.log('[FFmpeg]', message);
+    });
     loadFFmpeg();
   }, []);
 
@@ -55,14 +74,12 @@ function App() {
 
       const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm';
 
-      ffmpegRef.on('log', ({ message }) => {
-        console.log('[FFmpeg]', message);
-      });
-
-      await ffmpegRef.load({
+      // Cached so a reload after cancelling a job doesn't re-download the core.
+      coreURLsRef.current ??= {
         coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
         wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'),
-      });
+      };
+      await ffmpegRef.load(coreURLsRef.current);
 
       addLog('FFmpeg.wasm loaded successfully!');
       setFFmpegLoaded(true);
@@ -87,6 +104,10 @@ function App() {
       return;
     }
 
+    const jobId = ++jobIdRef.current;
+    const isStale = () => jobIdRef.current !== jobId;
+    busyRef.current = true;
+
     try {
       setAppState('loading-file');
       setError('');
@@ -95,7 +116,8 @@ function App() {
 
       addLog(`Selected file: ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB)`);
 
-      // Validate file size
+      // Validate file size up front, before copying it into ffmpeg's memory.
+      // Duration is checked again below once the metadata is known.
       const validation = validateFileLimits(file.size);
       if (!validation.valid) {
         setError(validation.error || 'File validation failed');
@@ -115,6 +137,17 @@ function App() {
         // Extract metadata
         addLog('Extracting file metadata...');
         const metadata = await extractMetadataDetailed(ffmpegRef, file, inputName);
+        if (isStale()) return;
+
+        const durationCheck = validateFileLimits(file.size, metadata.duration);
+        if (!durationCheck.valid) {
+          setError(durationCheck.error || 'File validation failed');
+          setAppState('error');
+          return;
+        }
+        if (durationCheck.warning) {
+          setFileWarning(durationCheck.warning);
+        }
 
         setFileMetadata(metadata);
         addLog(`✓ Metadata extracted: ${metadata.durationFormatted}, ${metadata.container.toUpperCase()}`);
@@ -128,25 +161,18 @@ function App() {
 
         setObjectUrl(URL.createObjectURL(file));
 
-        // Waveform preview is best-effort (native decode doesn't cover every
-        // container) and runs independently of silence detection.
-        generateWaveformPeaks(file)
-          .then(setWaveformPeaks)
-          .catch((err) => {
-            console.warn('Waveform preview unavailable:', err);
-            setWaveformError('Waveform preview isn’t available for this format, but silence detection still works below.');
-          });
-
         setAppState('detecting-silence');
         addLog('Detecting silence...');
 
-        const intervals = await detectSilence(
+        const { intervals, samples } = await analyzeAudio(
           ffmpegRef,
           inputName,
           DEFAULT_SETTINGS.silenceThreshold,
           DEFAULT_SETTINGS.minSilenceDuration
         );
+        if (isStale()) return;
 
+        setWaveformPeaks(computeWaveformPeaks(samples, ANALYSIS_SAMPLE_RATE));
         setSilenceIntervals(intervals);
         addLog(`✓ Silence detection complete: ${intervals.length} silent region(s) found`);
         setAppState('editing');
@@ -155,15 +181,28 @@ function App() {
       }
 
     } catch (err) {
+      if (isStale()) return; // cancelled: the terminated job's rejection isn't an error
       const errorMessage = err instanceof Error ? err.message : String(err);
       console.error('Error processing file:', err);
       setError(`Failed to process file: ${errorMessage}`);
       setAppState('error');
       addLog(`✗ Error: ${errorMessage}`);
+    } finally {
+      if (!isStale()) busyRef.current = false;
     }
   }, [ffmpegLoaded, ffmpegRef]);
 
   const handleRemoveFile = useCallback(() => {
+    jobIdRef.current++;
+    if (busyRef.current) {
+      // Stop the running ffmpeg job rather than letting it finish in the
+      // background, then bring a fresh instance back up for the next file.
+      busyRef.current = false;
+      ffmpegRef.terminate();
+      setFFmpegLoaded(false);
+      addLog('Processing cancelled');
+      loadFFmpeg();
+    }
     if (objectUrl) URL.revokeObjectURL(objectUrl);
     setSelectedFile(null);
     setFileMetadata(null);
@@ -172,12 +211,11 @@ function App() {
     setObjectUrl('');
     setSilenceIntervals(null);
     setWaveformPeaks(null);
-    setWaveformError('');
     setCurrentTime(0);
     setIsPlaying(false);
     setAppState('idle');
     addLog('File removed');
-  }, [objectUrl]);
+  }, [objectUrl, ffmpegRef]);
 
   const handleSeek = useCallback((time: number) => {
     if (mediaRef.current) {
@@ -416,7 +454,7 @@ function App() {
               />
             ) : (
               <div className="w-full h-32 rounded-md bg-navy-900 flex items-center justify-center text-sm text-muted px-4 text-center">
-                {waveformError || 'Generating waveform preview...'}
+                Generating waveform preview...
               </div>
             )}
 
