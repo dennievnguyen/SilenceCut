@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseDetailedMetadata, parseSilenceIntervals } from './ffmpeg-helpers.js';
+import { parseDetailedMetadata } from './ffmpeg-helpers.js';
 import { getFormatByExtension } from './constants.js';
 import { computeWaveformPeaks } from './waveform.js';
 
@@ -67,14 +67,6 @@ describe('parseDetailedMetadata', () => {
   it('rejects files with no audio track', () => {
     const videoOnly = LOGS.mp4.split('\n').slice(0, 2).join('\n');
     expect(parse(videoOnly, 'a.mp4')).toMatchObject({ hasAudio: false, isSupported: false });
-  });
-});
-
-describe('parseSilenceIntervals', () => {
-  it('pairs start/end lines into intervals', () => {
-    const logs = `[silencedetect @ 0x1] silence_start: 1.999977
-[silencedetect @ 0x1] silence_end: 4 | silence_duration: 2.000023`;
-    expect(parseSilenceIntervals(logs)).toEqual([{ start: 1.999977, end: 4, duration: 2.000023 }]);
   });
 });
 

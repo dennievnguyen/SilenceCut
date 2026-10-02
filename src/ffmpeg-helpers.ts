@@ -1,6 +1,6 @@
 import type { FFmpeg } from '@ffmpeg/ffmpeg';
 import { fetchFile } from '@ffmpeg/util';
-import type { FileMetadata, SilenceInterval } from './types';
+import type { FileMetadata } from './types';
 import { formatDuration, getFileExtension } from './utils.js';
 import { getFormatByExtension, isCodecSupported } from './constants.js';
 
@@ -180,95 +180,39 @@ export function parseDetailedMetadata(
   };
 }
 
-/** Sample rate of the mono PCM copy returned by analyzeAudio. */
+/** Sample rate of the mono PCM copy returned by decodeAnalysisAudio. */
 export const ANALYSIS_SAMPLE_RATE = 8000;
 
-export interface AudioAnalysis {
-  intervals: SilenceInterval[];
-  /** Mono 16-bit PCM at ANALYSIS_SAMPLE_RATE, for the waveform preview. */
-  samples: Int16Array;
-}
-
 /**
- * Decode the audio once and get two things out of that single pass:
- * silencedetect intervals (from the full-quality audio, parsed from the
- * logs) and a small downsampled mono PCM copy for the waveform. Keeping
- * the copy at 8 kHz/16-bit (~16 KB per second) avoids decoding the whole
- * file to full-rate floats in the browser, which ran out of memory on
- * long recordings.
+ * Decode the audio track once to a small downsampled mono 16-bit PCM copy
+ * (~16 KB per second at 8 kHz). Silence detection (silence.ts) and the
+ * waveform both run on this cached copy, so changing settings never
+ * re-decodes the file, and long recordings don't have to be decoded to
+ * full-rate floats in the browser.
  */
-export async function analyzeAudio(
+export async function decodeAnalysisAudio(
   ffmpeg: FFmpeg,
-  inputName: string,
-  thresholdDb: number,
-  minDurationSeconds: number
-): Promise<AudioAnalysis> {
-  let output = '';
-  const logHandler = ({ message }: { message: string }) => {
-    output += message + '\n';
-  };
+  inputName: string
+): Promise<Int16Array> {
   const pcmName = `${inputName}.pcm`;
-  ffmpeg.on('log', logHandler);
 
-  try {
-    await ffmpeg.exec([
-      '-i',
-      inputName,
-      '-vn',
-      '-af',
-      `silencedetect=noise=${thresholdDb}dB:d=${minDurationSeconds}`,
-      '-ac',
-      '1',
-      '-ar',
-      String(ANALYSIS_SAMPLE_RATE),
-      '-f',
-      's16le',
-      '-y',
-      pcmName,
-    ]);
-  } finally {
-    ffmpeg.off('log', logHandler);
-  }
+  await ffmpeg.exec([
+    '-i',
+    inputName,
+    '-vn',
+    '-ac',
+    '1',
+    '-ar',
+    String(ANALYSIS_SAMPLE_RATE),
+    '-f',
+    's16le',
+    '-y',
+    pcmName,
+  ]);
 
   const data = (await ffmpeg.readFile(pcmName)) as Uint8Array;
   await deleteInputFile(ffmpeg, pcmName);
-  const samples = new Int16Array(
+  return new Int16Array(
     data.buffer.slice(data.byteOffset, data.byteOffset + (data.byteLength & ~1))
   );
-
-  return { intervals: parseSilenceIntervals(output), samples };
-}
-
-/**
- * Parse silencedetect log lines into [start, end] intervals.
- *
- * Example lines:
- *   [silencedetect @ 0x...] silence_start: 4.2
- *   [silencedetect @ 0x...] silence_end: 6.7 | silence_duration: 2.5
- */
-export function parseSilenceIntervals(logs: string): SilenceInterval[] {
-  const intervals: SilenceInterval[] = [];
-  let pendingStart: number | null = null;
-
-  for (const line of logs.split('\n')) {
-    const startMatch = line.match(/silence_start:\s*(-?[\d.]+)/);
-    if (startMatch) {
-      pendingStart = parseFloat(startMatch[1]);
-      continue;
-    }
-
-    const endMatch = line.match(
-      /silence_end:\s*(-?[\d.]+)\s*\|\s*silence_duration:\s*(-?[\d.]+)/
-    );
-    if (endMatch && pendingStart !== null) {
-      intervals.push({
-        start: pendingStart,
-        end: parseFloat(endMatch[1]),
-        duration: parseFloat(endMatch[2]),
-      });
-      pendingStart = null;
-    }
-  }
-
-  return intervals;
 }

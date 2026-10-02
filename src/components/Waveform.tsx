@@ -31,7 +31,7 @@ export function Waveform({ peaks, duration, silenceIntervals, currentTime, onSee
     const barWidth = width / sampleCount;
 
     // Silence region shading (drawn first, under the waveform)
-    ctx.fillStyle = 'rgba(148, 163, 184, 0.35)'; // muted slate overlay
+    ctx.fillStyle = 'rgba(240, 168, 74, 0.35)'; // orange tint: regions that will be cut
     for (const interval of silenceIntervals) {
       const x1 = (interval.start / duration) * width;
       const x2 = (interval.end / duration) * width;

@@ -1,14 +1,15 @@
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useEffect, useRef, useState, useCallback, useMemo, useDeferredValue } from 'react';
 import { FFmpeg } from '@ffmpeg/ffmpeg';
 import { toBlobURL } from '@ffmpeg/util';
 import { FileUpload } from './components/FileUpload.js';
 import { FileInfo } from './components/FileInfo.js';
 import { Waveform } from './components/Waveform.js';
+import { SettingsPanel, type DetectionSettings } from './components/SettingsPanel.js';
 import { AppShell, type PipelineStepId } from './components/AppShell.js';
-import type { FileMetadata, AppState, SilenceInterval } from './types.js';
+import type { FileMetadata, AppState } from './types.js';
 import {
   extractMetadataDetailed,
-  analyzeAudio,
+  decodeAnalysisAudio,
   writeInputFile,
   deleteInputFile,
   ANALYSIS_SAMPLE_RATE,
@@ -16,6 +17,7 @@ import {
 import { validateFileLimits, formatDuration } from './utils.js';
 import { computeWaveformPeaks, type WaveformPeaks } from './waveform.js';
 import { DEFAULT_SETTINGS } from './constants.js';
+import { detectSilence, applyPadding } from './silence.js';
 
 function App() {
   const [appState, setAppState] = useState<AppState>('idle');
@@ -40,7 +42,13 @@ function App() {
   const [objectUrl, setObjectUrl] = useState<string>('');
 
   // Silence detection state
-  const [silenceIntervals, setSilenceIntervals] = useState<SilenceInterval[] | null>(null);
+  // Decoded once per file; every settings change re-detects against this.
+  const [analysisSamples, setAnalysisSamples] = useState<Int16Array | null>(null);
+  const [settings, setSettings] = useState<DetectionSettings>({
+    silenceThreshold: DEFAULT_SETTINGS.silenceThreshold,
+    minSilenceDuration: DEFAULT_SETTINGS.minSilenceDuration,
+    padding: DEFAULT_SETTINGS.padding,
+  });
   const [waveformPeaks, setWaveformPeaks] = useState<WaveformPeaks | null>(null);
 
   // Playback state
@@ -162,19 +170,14 @@ function App() {
         setObjectUrl(URL.createObjectURL(file));
 
         setAppState('detecting-silence');
-        addLog('Detecting silence...');
+        addLog('Analyzing audio...');
 
-        const { intervals, samples } = await analyzeAudio(
-          ffmpegRef,
-          inputName,
-          DEFAULT_SETTINGS.silenceThreshold,
-          DEFAULT_SETTINGS.minSilenceDuration
-        );
+        const samples = await decodeAnalysisAudio(ffmpegRef, inputName);
         if (isStale()) return;
 
         setWaveformPeaks(computeWaveformPeaks(samples, ANALYSIS_SAMPLE_RATE));
-        setSilenceIntervals(intervals);
-        addLog(`✓ Silence detection complete: ${intervals.length} silent region(s) found`);
+        setAnalysisSamples(samples);
+        addLog('✓ Audio analyzed — adjust the settings to tune detection');
         setAppState('editing');
       } finally {
         await deleteInputFile(ffmpegRef, inputName);
@@ -209,7 +212,7 @@ function App() {
     setError('');
     setFileWarning('');
     setObjectUrl('');
-    setSilenceIntervals(null);
+    setAnalysisSamples(null);
     setWaveformPeaks(null);
     setCurrentTime(0);
     setIsPlaying(false);
@@ -234,6 +237,25 @@ function App() {
     }
   }, []);
 
+  // Re-detect whenever the settings change. Deferred so dragging a slider
+  // stays smooth on long files while detection catches up.
+  const deferredSettings = useDeferredValue(settings);
+  const silenceIntervals = useMemo(() => {
+    if (!analysisSamples) return null;
+    const duration = analysisSamples.length / ANALYSIS_SAMPLE_RATE;
+    const raw = detectSilence(
+      analysisSamples,
+      ANALYSIS_SAMPLE_RATE,
+      deferredSettings.silenceThreshold,
+      deferredSettings.minSilenceDuration
+    );
+    return applyPadding(raw, deferredSettings.padding, duration);
+  }, [analysisSamples, deferredSettings]);
+
+  const analysisDuration = analysisSamples ? analysisSamples.length / ANALYSIS_SAMPLE_RATE : 0;
+  const removedDuration = silenceIntervals?.reduce((sum, i) => sum + i.duration, 0) ?? 0;
+  const percentRemoved = analysisDuration > 0 ? Math.round((removedDuration / analysisDuration) * 100) : 0;
+
   // Show Milestone 0 completion screen if no file is loaded
   const showMilestone0 = !selectedFile && appState === 'idle';
 
@@ -257,7 +279,7 @@ function App() {
           {showMilestone0
             ? 'Milestone 0: FFmpeg.wasm Integration Test'
             : silenceIntervals
-            ? 'Milestone 2: Silence Detection'
+            ? 'Milestone 3: Trim Settings'
             : fileMetadata
             ? 'Milestone 1: File Intake & Metadata'
             : 'Drop your file to begin'}
@@ -407,8 +429,7 @@ function App() {
             <div className="flex items-center gap-3">
               <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-sky"></div>
               <span className="text-ink text-sm">
-                Detecting silence (threshold {DEFAULT_SETTINGS.silenceThreshold}dB, min duration{' '}
-                {DEFAULT_SETTINGS.minSilenceDuration}s)...
+                Analyzing audio...
               </span>
             </div>
           </div>
@@ -469,47 +490,39 @@ function App() {
                 {formatDuration(currentTime)} / {fileMetadata.durationFormatted}
               </span>
             </div>
+
+            <SettingsPanel settings={settings} onChange={setSettings} />
           </div>
         )}
 
-        {/* Milestone 2: Silence Detection Complete */}
+        {/* Detection result: what the current settings would cut */}
         {silenceIntervals && (
-          <div className="bg-mint/10 border border-mint/30 rounded-md p-6">
-            <h3 className="text-base font-semibold mb-4 text-mint-dark">
-              Milestone 2: Silence Detection Complete
-            </h3>
-            {silenceIntervals.length > 0 ? (
-              <ul className="space-y-2 text-sm">
-                <li className="flex items-start gap-2">
-                  <span className="text-mint-dark mt-0.5">✓</span>
-                  <span className="text-ink/80">
-                    {silenceIntervals.length} silent region
-                    {silenceIntervals.length === 1 ? '' : 's'} found, totaling{' '}
-                    {formatDuration(
-                      silenceIntervals.reduce((sum, i) => sum + i.duration, 0)
-                    )}
-                  </span>
-                </li>
-                <li className="flex items-start gap-2">
-                  <span className="text-mint-dark mt-0.5">✓</span>
-                  <span className="text-ink/80">Silent regions shaded on the waveform above</span>
-                </li>
-                <li className="flex items-start gap-2">
-                  <span className="text-sky mt-0.5">→</span>
-                  <span className="text-ink/80">
-                    Next: Milestone 3 - adjustable threshold, min duration, and padding
-                  </span>
-                </li>
-              </ul>
-            ) : (
+          silenceIntervals.length > 0 ? (
+            <div className="bg-mint/10 border border-mint/30 rounded-md p-6">
+              <div className="flex flex-wrap items-baseline justify-between gap-4">
+                <div>
+                  <p className="text-[13px] font-medium tracking-wide text-mint-dark mb-1">
+                    ESTIMATED RESULT
+                  </p>
+                  <p className="text-3xl font-medium font-mono tabular-nums text-ink">
+                    {formatDuration(analysisDuration)} → {formatDuration(analysisDuration - removedDuration)}
+                  </p>
+                </div>
+                <p className="text-sm text-ink/80">
+                  {silenceIntervals.length} cut{silenceIntervals.length === 1 ? '' : 's'}, removing{' '}
+                  {formatDuration(removedDuration)} ({percentRemoved}%)
+                </p>
+              </div>
+            </div>
+          ) : (
+            <div className="bg-orange-tint/60 border border-orange/40 rounded-md p-4">
               <p className="text-sm text-ink/80">
-                No silence detected at the default settings (threshold{' '}
-                {DEFAULT_SETTINGS.silenceThreshold}dB, min duration{' '}
-                {DEFAULT_SETTINGS.minSilenceDuration}s). Milestone 3 will let you loosen these
-                settings manually.
+                No silence found at these settings (threshold {deferredSettings.silenceThreshold} dB,
+                min duration {deferredSettings.minSilenceDuration.toFixed(1)} s). Try raising the
+                threshold or lowering the minimum duration.
               </p>
-            )}
-          </div>
+            </div>
+          )
         )}
       </div>
     </AppShell>
