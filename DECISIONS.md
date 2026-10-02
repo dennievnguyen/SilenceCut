@@ -161,7 +161,7 @@ await ffmpegRef.load({
 
 ### Decision 5: Web Worker for FFmpeg Processing
 **Date:** 2026-06-30
-**Status:** 🔄 Planned for Milestone 2
+**Status:** ✅ Satisfied by the library (2026-10-02). `@ffmpeg/ffmpeg` 0.12 already runs the core in its own Web Worker, so no custom worker is needed. Cancelling uses `ffmpeg.terminate()`, then reloads the core.
 
 **Decision:**
 Run FFmpeg operations in a Web Worker to keep UI thread responsive.
@@ -283,13 +283,88 @@ Show clear, specific error messages that explain what went wrong and what to do 
 
 ---
 
-## Next Milestone: File Intake (Milestone 1)
+## Intake & Stability Fixes (2026-10-02)
 
-**Planned Decisions:**
-1. Drag-and-drop library vs native API
-2. File validation strategy (reject early vs attempt processing)
-3. Metadata display format
-4. Preview generation approach
+### Decision 10: Parse ffmpeg stream lines with optional fields
+**Date:** 2026-10-02
+**Status:** ✅ Implemented
+
+**Decision:**
+Parse each `Stream #...: Video:/Audio:` line on its own and require only the codec. Treat bitrate, fps, resolution, and channel layout as optional.
+
+**Rationale:**
+- The old single regex required `kb/s` on audio lines and `fps` on video lines. ffmpeg omits bitrate for FLAC and Opus, and fps for variable-frame-rate video. FLAC and WebM files were rejected as "no audio track", and VFR video was treated as audio-only.
+- `(attached pic)` streams (MP3/M4A cover art) are skipped so audio files aren't classified as video.
+- Unit tests use real `ffmpeg -i` output as fixtures, so parser changes are checked against what ffmpeg actually prints.
+
+### Decision 11: Cancellable jobs via job IDs + terminate
+**Date:** 2026-10-02
+**Status:** ✅ Implemented
+
+**Decision:**
+Every file selection or removal bumps a job ID. Async steps check it after each `await` and drop stale results. Removing a file mid-processing calls `ffmpeg.terminate()` and reloads the core from cached blob URLs. Each job's input file in ffmpeg's virtual filesystem gets a unique name.
+
+**Rationale:**
+Removing a file during detection used to let the old job finish and write its results over the cleared state. Unique filenames stop an old job's cleanup from deleting a newer job's input.
+
+### Decision 12: Add Vitest
+**Date:** 2026-10-02
+**Status:** ✅ Implemented
+
+**Decision:**
+Use Vitest (`npm test`) for unit tests of pure logic: metadata parsing, silence detection, padding, and waveform peaks.
+
+**Rationale:**
+It shares Vite's config and TypeScript setup with no extra build step. The parsing bugs fixed today would have been caught by tests built from real ffmpeg output.
+
+---
+
+## Milestone 3: Settings Panel
+
+### Decision 13: Decode once, detect silence in JS
+**Date:** 2026-10-02
+**Status:** ✅ Implemented
+
+**Decision:**
+ffmpeg decodes each file once to an 8 kHz mono 16-bit PCM copy (`-vn -ac 1 -ar 8000 -f s16le`). Silence detection (`src/silence.ts`) and the waveform both run on that copy. ffmpeg's `silencedetect` is no longer used.
+
+**Rationale:**
+- **Spec 5.3:** "cache the decoded audio... and re-threshold against cached data" and "process detection on a downsampled/mono copy."
+- **Speed:** re-detection takes ~30 ms in Node and ~60 ms end-to-end in the browser for a 10-minute file, against the Milestone 3 exit criterion of under 1 s. A 60-minute file takes ~150 ms.
+- **Accuracy:** on synthesized speech it found the same regions as `silencedetect` on the full-rate stereo file, with boundaries within ~80 ms. That's below the default 120 ms padding.
+- **Memory:** the copy is ~16 KB per second (~58 MB per hour). The previous waveform path decoded the whole file to full-rate floats with `decodeAudioData`, which also couldn't read MKV.
+
+**Algorithm:** mirrors `silencedetect`. A run of samples with |level| < 10^(dB/20) × 32768 lasting at least the minimum duration counts as silence, including silence that runs to the end of the file.
+
+**Tradeoffs:**
+Downmixing to mono means a silent channel next to a loud one isn't detected as silence. `silencedetect`'s default mode behaves the same way, and it's fine for spoken-word content.
+
+### Decision 14: Padding semantics
+**Date:** 2026-10-02
+**Status:** ✅ Implemented
+
+**Decision:**
+Shrink each silence interval inward by the padding on both sides (spec 5.2 step 4). Edges touching the start or end of the file aren't padded, since there's no speech there to protect. Intervals that padding shrinks to nothing are dropped. The waveform shades the padded intervals, i.e. what will actually be cut.
+
+### Decision 15: Deferred re-detection
+**Date:** 2026-10-02
+**Status:** ✅ Implemented
+
+**Decision:**
+Detected regions are derived state (`useMemo` over the cached samples and settings), using `useDeferredValue` on the settings.
+
+**Rationale:**
+Sliders stay smooth on long files: React renders the slider position immediately and catches detection up in the background. There's no separate interval state to keep in sync.
+
+### Decision 16: Settings persist across files
+**Date:** 2026-10-02
+**Status:** ✅ Implemented (open to revisit)
+
+**Decision:**
+Slider values carry over when a new file is loaded, and "Reset to defaults" restores the spec defaults.
+
+**Rationale:**
+Users processing a batch of similar recordings (e.g. a podcast series) usually want the same tuning.
 
 ---
 
@@ -320,7 +395,7 @@ Testing each format from spec Section 2 to verify FFmpeg.wasm build supports it:
 
 ---
 
-## Performance Benchmarks (To Be Collected)
+## Performance Benchmarks (In Progress)
 
 Will track processing times for different file sizes:
 - 5min H.264 1080p video
@@ -328,6 +403,17 @@ Will track processing times for different file sizes:
 - 1hr screen recording (VP9)
 
 Target: <30 seconds for 10-minute 1080p video on modern laptop.
+
+### Collected so far
+
+| Date | Input | Step | Result | Environment |
+|---|---|---|---|---|
+| 2026-08-29 | 648 MB / 3 min video | Silence detection (after the `-vn` and single-copy fixes) | 5+ min → ~30 s | Chrome, single-thread core |
+| 2026-10-02 | 9.6 min speech WAV (44.1 kHz stereo, 102 MB) | Load + one-pass decode to 8 kHz mono | 3.2 s | Headless Chrome, single-thread core |
+| 2026-10-02 | Same file | Re-detect on slider change | 55–66 ms | Headless Chrome |
+| 2026-10-02 | 10 min / 60 min synthetic speech PCM | `detectSilence` + `applyPadding` | ~30 ms / ~150 ms | Node 24 |
+
+Still to measure: compressed video (H.264 1080p, VP9) and export times (Milestone 4). The `@ffmpeg/core-mt` multi-threaded core is a deferred follow-up for further decode speedup.
 
 ---
 

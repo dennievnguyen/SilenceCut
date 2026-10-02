@@ -2,7 +2,7 @@
 
 A browser-based video/audio editor that automatically detects and removes silent sections from your recordings — without uploading files to any server.
 
-**Current Status:** 🏗️ Milestone 2 Complete - Silence Detection & Waveform Verified
+**Current Status:** 🏗️ Milestone 3 Complete - Live Detection Settings
 
 ---
 
@@ -35,18 +35,29 @@ Silence Cutter is a single-page web app designed for podcasters, YouTubers, and 
 - [x] Display file info to user
 
 ### ✅ Milestone 2: Silence Detection (COMPLETE)
-- [x] Run FFmpeg silencedetect filter
+- [x] Run FFmpeg silencedetect filter *(replaced by JS detection in Milestone 3)*
 - [x] Parse silence intervals
 - [x] Render interactive waveform
 - [x] Highlight silent regions
 
-### 🔄 Milestone 3: Settings Panel (NEXT)
-- [ ] Threshold slider (-60 to -20 dB)
-- [ ] Min duration slider (0.1 to 3.0s)
-- [ ] Padding control (0 to 500ms)
-- [ ] Live waveform updates (no re-processing)
+### 🛠️ Intake & Stability Fixes (2026-10-02)
+- [x] FLAC and WebM/Opus files no longer rejected as "no audio track" (ffmpeg omits their bitrate)
+- [x] Variable-frame-rate video (no fps reported) detected as video, not audio-only
+- [x] MP3/M4A cover art ignored instead of treated as a video stream; 5.1 audio reports 6 channels
+- [x] Removing a file mid-detection cancels the ffmpeg job and discards stale results
+- [x] Duration limits (30 min warning / 2 hr max) now enforced once metadata is known
+- [x] Waveform built from a small 8 kHz mono decode instead of full-rate `decodeAudioData` (fixes MKV and memory on long files)
+- [x] Unit tests added (`npm test`, Vitest)
 
-### ✂️ Milestone 4: Cut & Export
+### ✅ Milestone 3: Settings Panel (COMPLETE)
+- [x] Threshold slider (-60 to -20 dB)
+- [x] Min duration slider (0.1 to 3.0s)
+- [x] Padding control (0 to 500ms)
+- [x] Live waveform updates (no re-processing)
+- [x] Exit criterion met: re-detection takes ~60 ms on a 10-minute file (target: under 1 s)
+- [x] Estimated before → after duration and % removed shown live
+
+### 🔄 Milestone 4: Cut & Export (NEXT)
 - [ ] Build FFmpeg trim/concat filter graph
 - [ ] Process video with silence removed
 - [ ] Export in same format as input
@@ -54,8 +65,8 @@ Silence Cutter is a single-page web app designed for podcasters, YouTubers, and 
 
 ### 💅 Milestone 5: Polish
 - [ ] Progress indicators
-- [ ] Error state handling
-- [ ] Before/after duration stats
+- [ ] Error state handling *(cancel mid-detection done; cancel mid-export pending)*
+- [ ] Before/after duration stats *(live estimate done; actual post-export stats pending)*
 - [ ] Multi-format testing
 - [ ] Performance optimization
 
@@ -82,6 +93,9 @@ npm install
 
 # Start dev server
 npm run dev
+
+# Run unit tests
+npm test
 ```
 
 The app will be available at `http://localhost:5173`
@@ -106,9 +120,10 @@ npm run preview  # Preview production build locally
 
 ## Technology Stack
 
-- **Frontend:** React 18 + TypeScript
+- **Frontend:** React 19 + TypeScript
 - **Styling:** Tailwind CSS
 - **Build Tool:** Vite
+- **Testing:** Vitest
 - **Processing:** FFmpeg.wasm (@ffmpeg/ffmpeg v0.12.15)
 - **No Backend:** Everything runs client-side
 
@@ -140,8 +155,8 @@ Files are processed entirely in your browser using WebAssembly. No server upload
 
 ### Performance
 - FFmpeg runs in a Web Worker (non-blocking UI)
-- Cached audio waveform (no re-decoding when adjusting settings)
-- Downsampled audio for detection (faster processing)
+- Audio decoded once to an 8 kHz mono copy; waveform and silence detection both run on it
+- Settings changes re-detect in JS against that copy (no re-decoding)
 
 ### Browser Compatibility
 Requires modern browser features:
@@ -160,6 +175,10 @@ silenceCut/
 ├── src/
 │   ├── App.tsx           # Main application component
 │   ├── main.tsx          # React entry point
+│   ├── components/       # AppShell, FileUpload, FileInfo, Waveform, SettingsPanel
+│   ├── ffmpeg-helpers.ts # Metadata probe + one-pass audio decode
+│   ├── silence.ts        # Silence detection + padding (runs on cached audio)
+│   ├── waveform.ts       # Waveform peak computation
 │   ├── index.css         # Tailwind styles
 │   └── memories/         # Project documentation
 │       └── SPECS.md      # Product specification
@@ -202,6 +221,6 @@ Built with:
 
 ---
 
-**Current Milestone:** Milestone 2 ✅
-**Next Up:** Settings panel (threshold, min duration, padding)
+**Current Milestone:** Milestone 3 ✅
+**Next Up:** Cut & export (trim/concat, same format out, download)
 **Target v1 Completion:** [TBD]
