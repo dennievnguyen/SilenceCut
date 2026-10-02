@@ -184,6 +184,32 @@ export const SETTINGS_RANGES = {
 };
 
 /**
+ * Starting points offered in the settings help drawer
+ */
+export const DETECTION_PRESETS = [
+  {
+    name: 'Studio mic',
+    description: 'Quiet room, close mic. Only true silence gets cut.',
+    settings: { silenceThreshold: -50, minSilenceDuration: 0.5, padding: 150 },
+  },
+  {
+    name: 'Home recording',
+    description: 'Some fan or room hum in the background.',
+    settings: { silenceThreshold: -40, minSilenceDuration: 0.4, padding: 120 },
+  },
+  {
+    name: 'Noisy room',
+    description: 'Steady background noise, like a café or an AC unit.',
+    settings: { silenceThreshold: -30, minSilenceDuration: 0.6, padding: 200 },
+  },
+  {
+    name: 'Fast-paced',
+    description: 'Tight jump cuts that also trim short pauses.',
+    settings: { silenceThreshold: -40, minSilenceDuration: 0.2, padding: 60 },
+  },
+];
+
+/**
  * File size limits from SPECS.md Section 5.3
  */
 export const FILE_LIMITS = {

@@ -1,4 +1,7 @@
+import { useCallback, useRef, useState } from 'react';
 import { DEFAULT_SETTINGS, SETTINGS_RANGES } from '../constants.js';
+import type { AudioLevels } from '../levels.js';
+import { HelpDrawer } from './HelpDrawer.js';
 
 export interface DetectionSettings {
   silenceThreshold: number; // dB
@@ -8,6 +11,7 @@ export interface DetectionSettings {
 
 interface SettingsPanelProps {
   settings: DetectionSettings;
+  levels: AudioLevels | null;
   onChange: (settings: DetectionSettings) => void;
 }
 
@@ -47,7 +51,14 @@ function Slider({ id, label, hint, value, display, min, max, step, onChange }: S
   );
 }
 
-export function SettingsPanel({ settings, onChange }: SettingsPanelProps) {
+export function SettingsPanel({ settings, levels, onChange }: SettingsPanelProps) {
+  const [helpOpen, setHelpOpen] = useState(false);
+  const helpButtonRef = useRef<HTMLButtonElement>(null);
+  const closeHelp = useCallback(() => {
+    setHelpOpen(false);
+    helpButtonRef.current?.focus();
+  }, []);
+
   const isDefault =
     settings.silenceThreshold === DEFAULT_SETTINGS.silenceThreshold &&
     settings.minSilenceDuration === DEFAULT_SETTINGS.minSilenceDuration &&
@@ -56,7 +67,20 @@ export function SettingsPanel({ settings, onChange }: SettingsPanelProps) {
   return (
     <div className="border-t border-border pt-4">
       <div className="flex items-center justify-between mb-4">
-        <h4 className="text-[13px] font-medium tracking-wide text-muted">DETECTION SETTINGS</h4>
+        <div className="flex items-center gap-3">
+          <h4 className="text-[13px] font-medium tracking-wide text-muted">DETECTION SETTINGS</h4>
+          <button
+            ref={helpButtonRef}
+            onClick={() => setHelpOpen((open) => !open)}
+            aria-expanded={helpOpen}
+            className="flex items-center gap-1.5 px-2 py-1 rounded-sm text-xs text-muted border border-transparent hover:border-border hover:text-ink transition-colors"
+          >
+            <span className="w-4 h-4 rounded-full border border-current flex items-center justify-center text-[10px] leading-none">
+              ?
+            </span>
+            How these work
+          </button>
+        </div>
         <button
           onClick={() =>
             onChange({
@@ -101,6 +125,10 @@ export function SettingsPanel({ settings, onChange }: SettingsPanelProps) {
           onChange={(padding) => onChange({ ...settings, padding })}
         />
       </div>
+
+      {helpOpen && (
+        <HelpDrawer settings={settings} levels={levels} onChange={onChange} onClose={closeHelp} />
+      )}
     </div>
   );
 }

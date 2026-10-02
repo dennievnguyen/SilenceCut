@@ -18,6 +18,7 @@ import { validateFileLimits, formatDuration } from './utils.js';
 import { computeWaveformPeaks, type WaveformPeaks } from './waveform.js';
 import { DEFAULT_SETTINGS } from './constants.js';
 import { detectSilence, applyPadding } from './silence.js';
+import { measureLevels } from './levels.js';
 
 function App() {
   const [appState, setAppState] = useState<AppState>('idle');
@@ -251,6 +252,11 @@ function App() {
     );
     return applyPadding(raw, deferredSettings.padding, duration);
   }, [analysisSamples, deferredSettings]);
+
+  const audioLevels = useMemo(
+    () => (analysisSamples ? measureLevels(analysisSamples, ANALYSIS_SAMPLE_RATE) : null),
+    [analysisSamples]
+  );
 
   const analysisDuration = analysisSamples ? analysisSamples.length / ANALYSIS_SAMPLE_RATE : 0;
   const removedDuration = silenceIntervals?.reduce((sum, i) => sum + i.duration, 0) ?? 0;
@@ -491,7 +497,7 @@ function App() {
               </span>
             </div>
 
-            <SettingsPanel settings={settings} onChange={setSettings} />
+            <SettingsPanel settings={settings} levels={audioLevels} onChange={setSettings} />
           </div>
         )}
 
