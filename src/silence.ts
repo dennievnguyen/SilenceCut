@@ -1,4 +1,4 @@
-import type { SilenceInterval } from './types.js';
+import type { KeepSegment, SilenceInterval } from './types.js';
 
 /**
  * Silence detection over the cached mono PCM from decodeAnalysisAudio().
@@ -66,4 +66,33 @@ export function applyPadding(
   }
 
   return padded;
+}
+
+/**
+ * Invert padded silence intervals into the segments to keep (SPECS.md §5.2
+ * step 5). Expects intervals sorted and non-overlapping, as detectSilence()
+ * and applyPadding() produce them. Slivers shorter than `minKeepSeconds`
+ * are dropped: a few milliseconds of audio between two cuts is a click, not
+ * content, and each segment costs a trim + concat input in the export graph.
+ */
+export function keepSegments(
+  silences: SilenceInterval[],
+  totalDuration: number,
+  minKeepSeconds = 0.02
+): KeepSegment[] {
+  const segments: KeepSegment[] = [];
+  let cursor = 0;
+
+  const keep = (start: number, end: number) => {
+    if (end - start >= minKeepSeconds) segments.push({ start, end });
+  };
+
+  for (const silence of silences) {
+    const start = Math.max(0, Math.min(silence.start, totalDuration));
+    keep(cursor, start);
+    cursor = Math.max(cursor, Math.min(silence.end, totalDuration));
+  }
+  keep(cursor, totalDuration);
+
+  return segments;
 }

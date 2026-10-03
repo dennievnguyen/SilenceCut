@@ -52,6 +52,12 @@ export interface SilenceInterval {
   duration: number;  // in seconds
 }
 
+/** A stretch of the input that survives the cut (SPECS.md §5.2 step 5). */
+export interface KeepSegment {
+  start: number;     // in seconds
+  end: number;       // in seconds
+}
+
 export interface ProcessingResult {
   originalDuration: number;
   newDuration: number;

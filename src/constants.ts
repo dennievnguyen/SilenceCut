@@ -166,7 +166,7 @@ export function isCodecSupported(
  * Default processing settings from SPECS.md Section 4
  */
 export const DEFAULT_SETTINGS = {
-  silenceThreshold: -40,      // dB
+  silenceThreshold: -35,      // dB
   minSilenceDuration: 0.4,    // seconds
   padding: 120,               // milliseconds
   speedUp: false,
@@ -195,7 +195,7 @@ export const DETECTION_PRESETS = [
   {
     name: 'Home recording',
     description: 'Some fan or room hum in the background.',
-    settings: { silenceThreshold: -40, minSilenceDuration: 0.4, padding: 120 },
+    settings: { silenceThreshold: -35, minSilenceDuration: 0.4, padding: 120 },
   },
   {
     name: 'Noisy room',

@@ -12,12 +12,13 @@ import {
   decodeAnalysisAudio,
   writeInputFile,
   deleteInputFile,
+  exportCut,
   ANALYSIS_SAMPLE_RATE,
 } from './ffmpeg-helpers.js';
-import { validateFileLimits, formatDuration } from './utils.js';
+import { validateFileLimits, formatDuration, formatFileSize, generateOutputFilename } from './utils.js';
 import { computeWaveformPeaks, type WaveformPeaks } from './waveform.js';
 import { DEFAULT_SETTINGS } from './constants.js';
-import { detectSilence, applyPadding } from './silence.js';
+import { detectSilence, applyPadding, keepSegments } from './silence.js';
 import { measureLevels } from './levels.js';
 
 function App() {
@@ -52,6 +53,15 @@ function App() {
   });
   const [waveformPeaks, setWaveformPeaks] = useState<WaveformPeaks | null>(null);
 
+  // Export state
+  const [exportProgress, setExportProgress] = useState(0);
+  const [exportResult, setExportResult] = useState<{
+    url: string;
+    filename: string;
+    size: number;
+    duration: number;
+  } | null>(null);
+
   // Playback state
   const mediaRef = useRef<HTMLVideoElement | HTMLAudioElement>(null);
   const [currentTime, setCurrentTime] = useState(0);
@@ -72,6 +82,12 @@ function App() {
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
   }, [objectUrl]);
+
+  useEffect(() => {
+    return () => {
+      if (exportResult) URL.revokeObjectURL(exportResult.url);
+    };
+  }, [exportResult]);
 
   const addLog = (message: string) => {
     setLogs(prev => [...prev, `[${new Date().toISOString().split('T')[1].split('.')[0]}] ${message}`]);
@@ -196,17 +212,22 @@ function App() {
     }
   }, [ffmpegLoaded, ffmpegRef]);
 
-  const handleRemoveFile = useCallback(() => {
+  // Invalidate the current job and, if ffmpeg is mid-exec, stop it rather
+  // than letting it finish in the background, then bring a fresh instance
+  // back up for the next job.
+  const cancelRunningJob = useCallback(() => {
     jobIdRef.current++;
     if (busyRef.current) {
-      // Stop the running ffmpeg job rather than letting it finish in the
-      // background, then bring a fresh instance back up for the next file.
       busyRef.current = false;
       ffmpegRef.terminate();
       setFFmpegLoaded(false);
       addLog('Processing cancelled');
       loadFFmpeg();
     }
+  }, [ffmpegRef]);
+
+  const handleRemoveFile = useCallback(() => {
+    cancelRunningJob();
     if (objectUrl) URL.revokeObjectURL(objectUrl);
     setSelectedFile(null);
     setFileMetadata(null);
@@ -215,11 +236,13 @@ function App() {
     setObjectUrl('');
     setAnalysisSamples(null);
     setWaveformPeaks(null);
+    setExportResult(null);
+    setExportProgress(0);
     setCurrentTime(0);
     setIsPlaying(false);
     setAppState('idle');
     addLog('File removed');
-  }, [objectUrl, ffmpegRef]);
+  }, [objectUrl, cancelRunningJob]);
 
   const handleSeek = useCallback((time: number) => {
     if (mediaRef.current) {
@@ -253,6 +276,80 @@ function App() {
     return applyPadding(raw, deferredSettings.padding, duration);
   }, [analysisSamples, deferredSettings]);
 
+  const segments = useMemo(
+    () => (silenceIntervals && analysisSamples
+      ? keepSegments(silenceIntervals, analysisSamples.length / ANALYSIS_SAMPLE_RATE)
+      : null),
+    [silenceIntervals, analysisSamples]
+  );
+
+  // A finished export only matches the settings it was made with.
+  useEffect(() => {
+    setExportResult(null);
+  }, [segments]);
+
+  const handleExport = useCallback(async () => {
+    if (!selectedFile || !fileMetadata || !segments?.length || !ffmpegLoaded) return;
+
+    const jobId = ++jobIdRef.current;
+    const isStale = () => jobIdRef.current !== jobId;
+    busyRef.current = true;
+    let inputName: string | null = null;
+
+    setAppState('processing');
+    setExportProgress(0);
+    setExportResult(null);
+    setError('');
+    addLog(`Exporting ${segments.length} segment${segments.length === 1 ? '' : 's'}...`);
+    const startedAt = performance.now();
+
+    try {
+      // The analysis pass deleted its copy; the File is still in memory, so
+      // export (and any retry) never needs a re-upload.
+      inputName = await writeInputFile(ffmpegRef, selectedFile);
+      if (isStale()) return;
+
+      const { data, fallbacks } = await exportCut(ffmpegRef, inputName, fileMetadata, segments, fraction => {
+        if (!isStale()) setExportProgress(fraction);
+      });
+      if (isStale()) return;
+
+      for (const fallback of fallbacks) {
+        addLog(`⚠ No in-browser encoder for ${fallback}; used the ${fileMetadata.container.toUpperCase()} default instead`);
+      }
+
+      const blob = new Blob([data.slice()], { type: selectedFile.type || 'application/octet-stream' });
+      setExportResult({
+        url: URL.createObjectURL(blob),
+        filename: generateOutputFilename(selectedFile.name),
+        size: blob.size,
+        duration: segments.reduce((sum, s) => sum + s.end - s.start, 0),
+      });
+      setAppState('complete');
+      addLog(`✓ Export finished in ${((performance.now() - startedAt) / 1000).toFixed(1)} s`);
+    } catch (err) {
+      if (isStale()) return; // cancelled
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      console.error('Error exporting:', err);
+      setError(`Export failed: ${errorMessage}. Your settings are kept; you can try again.`);
+      setAppState('editing');
+      addLog(`✗ Export failed: ${errorMessage}`);
+    } finally {
+      if (!isStale()) {
+        if (inputName) await deleteInputFile(ffmpegRef, inputName);
+        busyRef.current = false;
+      }
+    }
+  }, [selectedFile, fileMetadata, segments, ffmpegLoaded, ffmpegRef]);
+
+  const handleCancelExport = useCallback(() => {
+    cancelRunningJob();
+    setExportProgress(0);
+    setAppState('editing');
+  }, [cancelRunningJob]);
+
+  const isExporting = appState === 'processing';
+
   const audioLevels = useMemo(
     () => (analysisSamples ? measureLevels(analysisSamples, ANALYSIS_SAMPLE_RATE) : null),
     [analysisSamples]
@@ -266,12 +363,18 @@ function App() {
   const showMilestone0 = !selectedFile && appState === 'idle';
 
   // Map app state to sidebar pipeline step
-  const currentStep: PipelineStepId = silenceIntervals
+  const currentStep: PipelineStepId = isExporting || exportResult
+    ? 'export'
+    : silenceIntervals
     ? 'trim'
     : fileMetadata
     ? 'detect'
     : 'upload';
-  const completedSteps: PipelineStepId[] = fileMetadata
+  const completedSteps: PipelineStepId[] = exportResult
+    ? ['upload', 'detect', 'trim', 'export']
+    : isExporting
+    ? ['upload', 'detect', 'trim']
+    : fileMetadata
     ? silenceIntervals
       ? ['upload', 'detect']
       : ['upload']
@@ -284,6 +387,8 @@ function App() {
         <p className="text-muted text-sm">
           {showMilestone0
             ? 'Milestone 0: FFmpeg.wasm Integration Test'
+            : isExporting || exportResult
+            ? 'Milestone 4: Cut & Export'
             : silenceIntervals
             ? 'Milestone 3: Trim Settings'
             : fileMetadata
@@ -497,7 +602,10 @@ function App() {
               </span>
             </div>
 
-            <SettingsPanel settings={settings} levels={audioLevels} onChange={setSettings} />
+            {/* Locked while exporting so the export matches what's on screen */}
+            <fieldset disabled={isExporting} className="disabled:opacity-60">
+              <SettingsPanel settings={settings} levels={audioLevels} onChange={setSettings} />
+            </fieldset>
           </div>
         )}
 
@@ -518,6 +626,54 @@ function App() {
                   {silenceIntervals.length} cut{silenceIntervals.length === 1 ? '' : 's'}, removing{' '}
                   {formatDuration(removedDuration)} ({percentRemoved}%)
                 </p>
+              </div>
+
+              <div className="mt-5 pt-5 border-t border-mint/30">
+                {isExporting ? (
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between text-sm">
+                      <span className="text-ink">Removing silence… {Math.round(exportProgress * 100)}%</span>
+                      <button
+                        onClick={handleCancelExport}
+                        className="px-3 py-1.5 rounded-sm text-xs text-muted border border-border hover:text-ink transition-colors"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                    <div className="h-2 rounded-full bg-border overflow-hidden">
+                      <div
+                        className="h-full bg-orange transition-[width] duration-300"
+                        style={{ width: `${exportProgress * 100}%` }}
+                      />
+                    </div>
+                  </div>
+                ) : exportResult ? (
+                  <div className="flex flex-wrap items-center justify-between gap-4">
+                    <p className="text-sm text-ink/80">
+                      Done: {formatDuration(analysisDuration)} → {formatDuration(exportResult.duration)},{' '}
+                      {exportResult.filename} ({formatFileSize(exportResult.size)})
+                    </p>
+                    <a
+                      href={exportResult.url}
+                      download={exportResult.filename}
+                      className="px-4 py-2 rounded-md bg-orange text-white text-sm font-medium hover:bg-orange-dark transition-colors"
+                    >
+                      Download
+                    </a>
+                  </div>
+                ) : segments && segments.length === 0 ? (
+                  <p className="text-sm text-ink/80">
+                    These settings would cut the entire file. Lower the threshold to keep some of it.
+                  </p>
+                ) : (
+                  <button
+                    onClick={handleExport}
+                    disabled={!ffmpegLoaded || !segments}
+                    className="px-4 py-2 rounded-md bg-orange text-white text-sm font-medium hover:bg-orange-dark disabled:opacity-40 disabled:hover:bg-orange transition-colors"
+                  >
+                    {ffmpegLoaded ? 'Remove Silence' : 'Restarting FFmpeg…'}
+                  </button>
+                )}
               </div>
             </div>
           ) : (

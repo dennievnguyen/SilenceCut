@@ -71,7 +71,7 @@ These are the user-facing controls. Defaults are tuned for typical spoken-word c
 
 | Parameter | Default | Range | Description |
 |---|---|---|---|
-| Silence threshold | -40 dB | -60 to -20 dB | Audio level below which a moment counts as silence. Lower (more negative) = stricter, catches only true silence. |
+| Silence threshold | -35 dB | -60 to -20 dB | Audio level below which a moment counts as silence. Lower (more negative) = stricter, catches only true silence. |
 | Min silence duration | 0.4 s | 0.1 to 3.0 s | Silences shorter than this are ignored and left in place, to avoid choppy cuts on natural speech pauses. |
 | Padding | 120 ms | 0 to 500 ms | Buffer kept before/after each cut boundary so words are not clipped. |
 | Speed-up (optional) | Off | 1x to 8x | Alternative to hard cuts: speed up silent segments instead of removing them entirely (style popularized by Descript/Premiere auto-cut tools). |

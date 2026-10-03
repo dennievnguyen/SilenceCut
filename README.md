@@ -1,14 +1,14 @@
 # Silence Cutter 🎬✂️
 
-A browser-based video/audio editor that automatically detects and removes silent sections from your recordings — without uploading files to any server.
+The ultimate browser-based video/audio editor that automatically detects and removes silent sections from your recordings without uploading files to any server.
 
-**Current Status:** 🏗️ Milestone 3 Complete - Live Detection Settings
+**Current Status:** 🏗️ Milestone 4 Complete - Cut & Export
 
 ---
 
 ## What is this?
 
-Silence Cutter is a single-page web app designed for podcasters, YouTubers, and content creators who want to remove dead air from their recordings quickly without manual timeline editing.
+SilenceCut is a single-page web app designed for podcasters, YouTubers, and content creators who want to remove dead air from their recordings quickly without manual timeline editing.
 
 **Key Features:**
 - 🔒 **100% Private:** All processing happens in your browser - files never leave your device
@@ -57,18 +57,20 @@ Silence Cutter is a single-page web app designed for podcasters, YouTubers, and 
 - [x] Exit criterion met: re-detection takes ~60 ms on a 10-minute file (target: under 1 s)
 - [x] Estimated before → after duration and % removed shown live
 
-### 🔄 Milestone 4: Cut & Export (NEXT)
-- [ ] Build FFmpeg trim/concat filter graph
-- [ ] Process video with silence removed
-- [ ] Export in same format as input
-- [ ] Download button
+### ✅ Milestone 4: Cut & Export (COMPLETE)
+- [x] Build FFmpeg trim/concat filter graph
+- [x] Process video with silence removed (re-encoded for frame-accurate cuts)
+- [x] Export in same format as input *(verified: H.264/AAC MP4; other formats in Milestone 5)*
+- [x] Download button
+- [x] Progress bar and cancel during export; retry after a failure without re-uploading
+- [x] Exit criterion met: 5:54 1080p MP4 → 3:28 MP4, plays back with silence gone (export ~10 min)
 
-### 💅 Milestone 5: Polish
-- [ ] Progress indicators
-- [ ] Error state handling *(cancel mid-detection done; cancel mid-export pending)*
-- [ ] Before/after duration stats *(live estimate done; actual post-export stats pending)*
-- [ ] Multi-format testing
-- [ ] Performance optimization
+### 🔄 Milestone 5: Polish (NEXT)
+- [ ] Progress indicators *(export progress bar done; detection pending)*
+- [ ] Error state handling *(cancel mid-detection and mid-export done)*
+- [ ] Before/after duration stats *(live estimate and post-export duration/size done)*
+- [ ] Multi-format testing *(fill in CODEC_SUPPORT.md)*
+- [ ] Performance optimization *(H.264 now `ultrafast`; next: multi-threaded core, needs a hosting decision; see DECISIONS.md 18)*
 
 ---
 
@@ -176,8 +178,9 @@ silenceCut/
 │   ├── App.tsx           # Main application component
 │   ├── main.tsx          # React entry point
 │   ├── components/       # AppShell, FileUpload, FileInfo, Waveform, SettingsPanel
-│   ├── ffmpeg-helpers.ts # Metadata probe + one-pass audio decode
-│   ├── silence.ts        # Silence detection + padding (runs on cached audio)
+│   ├── ffmpeg-helpers.ts # Metadata probe, one-pass audio decode, export
+│   ├── silence.ts        # Silence detection, padding, keep segments (runs on cached audio)
+│   ├── cut.ts            # Export filter graph + same-codec encoder choice
 │   ├── waveform.ts       # Waveform peak computation
 │   ├── index.css         # Tailwind styles
 │   └── memories/         # Project documentation
@@ -221,6 +224,6 @@ Built with:
 
 ---
 
-**Current Milestone:** Milestone 3 ✅
-**Next Up:** Cut & export (trim/concat, same format out, download)
+**Current Milestone:** Milestone 4 ✅
+**Next Up:** Polish (multi-format testing, error states, performance)
 **Target v1 Completion:** [TBD]

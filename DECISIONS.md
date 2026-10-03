@@ -368,6 +368,41 @@ Users processing a batch of similar recordings (e.g. a podcast series) usually w
 
 ---
 
+### Decision 17: Default threshold -35 dB
+**Date:** 2026-10-03
+**Status:** ✅ Implemented
+
+**Decision:**
+The default silence threshold moves from -40 dB to -35 dB. The presets are unchanged, so "Home recording" (-40 dB) no longer matches the defaults.
+
+**Rationale:**
+Product call. Less strict, so quiet room tone counts as silence and gets cut out of the box.
+
+---
+
+## Milestone 4: Cut & Export
+
+### Decision 18: Re-encode through trim + concat, not stream copy
+**Date:** 2026-10-03
+**Status:** ✅ Implemented (filter graph); export wiring in progress
+
+**Decision:**
+Cut with a `-filter_complex` graph: one `trim`/`atrim` per keep segment, timestamps reset, then a single `concat`. This re-encodes the output.
+
+**Alternatives considered:**
+- **Stream copy (`-c copy` with segment seeks):** much faster, no quality loss, but can only cut on keyframes. With typical 2–10 s GOPs, cuts land up to seconds away from the detected boundary, which clips words or leaves silence in. That breaks the "don't clip words" promise in SPECS.md §4.
+- **`select`/`aselect` with `between()` expressions:** one filter instead of N, but the expression grows just as long and is harder to debug.
+
+**Tradeoff:**
+Re-encoding video in single-threaded wasm is slow. Audio-only files are cheap. This is the main reason to revisit the multi-threaded core after Milestone 4.
+
+**Details:**
+- `keepSegments()` (src/silence.ts) drops slivers under 20 ms between cuts.
+- `buildCutFilterGraph()` (src/cut.ts) writes timestamps to the millisecond.
+- H.264 uses `-preset ultrafast -crf 20`. With `veryfast`, a 5:54 1080p Canon MP4 (1.29 GB, 85 segments) took 26 min 13 s to export (3:28 out, 76.2 MB, quality judged fine). Switched to `ultrafast` on 2026-10-03 to trade file size for speed. Same file and settings: **644.6 s (10 min 45 s), 2.4× faster**, 179.3 MB out (~6.9 Mbps). Export now takes ~1.8× the input's length on 1080p.
+
+---
+
 ## Codec Support Matrix (To Be Documented)
 
 **Status:** 🔄 In Progress

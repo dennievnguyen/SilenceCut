@@ -1,8 +1,9 @@
 import type { FFmpeg } from '@ffmpeg/ffmpeg';
 import { fetchFile } from '@ffmpeg/util';
-import type { FileMetadata } from './types';
+import type { FileMetadata, KeepSegment } from './types';
 import { formatDuration, getFileExtension } from './utils.js';
 import { getFormatByExtension, isCodecSupported } from './constants.js';
+import { buildCutFilterGraph, encoderArgs } from './cut.js';
 
 let inputCounter = 0;
 
@@ -215,4 +216,67 @@ export async function decodeAnalysisAudio(
   return new Int16Array(
     data.buffer.slice(data.byteOffset, data.byteOffset + (data.byteLength & ~1))
   );
+}
+
+export interface CutResult {
+  data: Uint8Array;
+  /** Codecs that couldn't be kept and fell back to the container default. */
+  fallbacks: string[];
+}
+
+/**
+ * Cut the keep segments out of the input and stitch them back together,
+ * re-encoding to the input's container and codecs (SPECS.md §5.2 steps
+ * 6–7). `onProgress` gets 0–1, measured as encoded time over the expected
+ * output duration.
+ */
+export async function exportCut(
+  ffmpeg: FFmpeg,
+  inputName: string,
+  metadata: FileMetadata,
+  segments: KeepSegment[],
+  onProgress: (fraction: number) => void
+): Promise<CutResult> {
+  const outputName = `output-${inputName}`;
+  const expectedSeconds = segments.reduce((sum, s) => sum + s.end - s.start, 0);
+  const streams = { video: metadata.hasVideo, audio: metadata.hasAudio };
+  const { args: codecArgs, fallbacks } = encoderArgs(metadata);
+
+  // ffmpeg reports progress time in microseconds.
+  const progressHandler = ({ time }: { time: number }) => {
+    if (expectedSeconds > 0) onProgress(Math.min(1, Math.max(0, time / 1e6 / expectedSeconds)));
+  };
+  const recentLogs: string[] = [];
+  const logHandler = ({ message }: { message: string }) => {
+    recentLogs.push(message);
+    if (recentLogs.length > 20) recentLogs.shift();
+  };
+
+  ffmpeg.on('progress', progressHandler);
+  ffmpeg.on('log', logHandler);
+  try {
+    const exitCode = await ffmpeg.exec([
+      '-i',
+      inputName,
+      '-filter_complex',
+      buildCutFilterGraph(segments, streams),
+      ...(streams.video ? ['-map', '[outv]'] : []),
+      ...(streams.audio ? ['-map', '[outa]'] : []),
+      ...codecArgs,
+      '-y',
+      outputName,
+    ]);
+    if (exitCode !== 0) {
+      const detail = recentLogs.filter(l => /error|invalid|unknown|not found/i.test(l)).pop();
+      throw new Error(`Encoding failed (ffmpeg exit code ${exitCode})${detail ? `: ${detail.trim()}` : ''}`);
+    }
+
+    const data = (await ffmpeg.readFile(outputName)) as Uint8Array;
+    onProgress(1);
+    return { data, fallbacks };
+  } finally {
+    ffmpeg.off('progress', progressHandler);
+    ffmpeg.off('log', logHandler);
+    await deleteInputFile(ffmpeg, outputName);
+  }
 }

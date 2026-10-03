@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { applyPadding, detectSilence } from './silence.js';
+import { applyPadding, detectSilence, keepSegments } from './silence.js';
 
 const RATE = 100; // 100 samples per second keeps the fixtures readable
 const LOUD = 10000; // ~-10 dBFS
@@ -65,5 +65,40 @@ describe('applyPadding', () => {
 
   it('drops intervals that padding consumes entirely', () => {
     expect(applyPadding([{ start: 1, end: 1.2, duration: 0.2 }], 120, 10)).toEqual([]);
+  });
+});
+
+describe('keepSegments', () => {
+  const gap = (start: number, end: number) => ({ start, end, duration: end - start });
+
+  it('keeps the speech between silences', () => {
+    expect(keepSegments([gap(2, 3), gap(5, 6)], 10)).toEqual([
+      { start: 0, end: 2 },
+      { start: 3, end: 5 },
+      { start: 6, end: 10 },
+    ]);
+  });
+
+  it('handles silence at the very start and end', () => {
+    expect(keepSegments([gap(0, 1), gap(9, 10)], 10)).toEqual([{ start: 1, end: 9 }]);
+  });
+
+  it('keeps the whole file when there is no silence', () => {
+    expect(keepSegments([], 10)).toEqual([{ start: 0, end: 10 }]);
+  });
+
+  it('keeps nothing when the whole file is silent', () => {
+    expect(keepSegments([gap(0, 10)], 10)).toEqual([]);
+  });
+
+  it('drops slivers shorter than the minimum keep length', () => {
+    expect(keepSegments([gap(1, 2), gap(2.01, 3)], 4)).toEqual([
+      { start: 0, end: 1 },
+      { start: 3, end: 4 },
+    ]);
+  });
+
+  it('clamps intervals that overrun the file duration', () => {
+    expect(keepSegments([gap(8, 10.5)], 10)).toEqual([{ start: 0, end: 8 }]);
   });
 });
